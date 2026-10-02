@@ -98,6 +98,8 @@ export const enum RuntimeErrorCode {
     // (undocumented)
     INVALID_RESOURCE_CREATION_IN_PARAMS = 992,
     // (undocumented)
+    INVALID_RESOURCE_KEEP_ALIVE = 993,
+    // (undocumented)
     INVALID_SET_INPUT_CALL = 317,
     // (undocumented)
     INVALID_SKIP_HYDRATION_HOST = -504,

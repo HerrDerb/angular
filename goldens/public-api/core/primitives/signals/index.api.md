@@ -158,7 +158,9 @@ export interface ReactiveNode {
     producers: ReactiveLink | undefined;
     producersTail: ReactiveLink | undefined;
     recomputing: boolean;
+    unwatched?(): void;
     version: Version;
+    watched?(): void;
 }
 
 // @public (undocumented)

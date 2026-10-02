@@ -241,6 +241,32 @@ export interface BaseResourceOptions<T, R> {
    * This value value needs to be identical for both the client and server.
    */
   id?: string;
+
+  /**
+   * What the resource's lifetime follows.
+   *
+   * - `'injector'` (default): the resource loads as soon as it is created and lives until its
+   *   injector is destroyed.
+   * - `'refCounted'`: the resource is `idle` until something live, such as a template or an
+   *   `effect`, reads one of its signals. The first live reader starts the load, further ones
+   *   share it, and `keepAliveMs` after the last one is gone the resource aborts any in-flight
+   *   load and returns to `idle`. Reads outside a reactive context, for example in an event
+   *   handler or through `untracked`, do not count as references.
+   *
+   * Use `'refCounted'` for a resource held by a long-lived service that only some views need.
+   *
+   * @experimental
+   */
+  lifetime?: 'injector' | 'refCounted';
+
+  /**
+   * With `lifetime: 'refCounted'`: how long the resource keeps its state after the last live
+   * reader is gone, so that a view switch hands the state over instead of loading again.
+   * Defaults to `0`, which still spans a same-tick switch such as a route change.
+   *
+   * @experimental
+   */
+  keepAliveMs?: number;
 }
 
 /**
@@ -282,8 +308,7 @@ export interface StreamingResourceOptions<T, R> extends BaseResourceOptions<T, R
  * @publicApi 22.0
  */
 export type ResourceOptions<T, R> = (
-  | PromiseResourceOptions<T, R>
-  | StreamingResourceOptions<T, R>
+  PromiseResourceOptions<T, R> | StreamingResourceOptions<T, R>
 ) & {
   /**
    * A debug name for the reactive node. Used in Angular DevTools to identify the node.
@@ -331,5 +356,4 @@ export interface DebouncedOptions<T> {
  * @experimental 22.0
  */
 export type DebounceTimer<T> =
-  | number
-  | ((value: T, lastValue: ResourceSnapshot<T>) => Promise<void> | void);
+  number | ((value: T, lastValue: ResourceSnapshot<T>) => Promise<void> | void);

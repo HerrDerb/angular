@@ -12,6 +12,7 @@ import {effect, EffectRef} from '../render3/reactivity/effect';
 import {signal, signalAsReadonlyFn, WritableSignal} from '../render3/reactivity/signal';
 import {untracked} from '../render3/reactivity/untracked';
 import {
+  BaseResourceOptions,
   Resource,
   ResourceDependencyError,
   ResourceOptions,
@@ -36,6 +37,8 @@ import {DestroyRef} from '../linker/destroy_ref';
 import {PendingTasks} from '../pending_tasks';
 import {linkedSignal} from '../render3/reactivity/linked_signal';
 import {StateKey, TransferState} from '../transfer_state';
+import {NgZone} from '../zone/ng_zone';
+import {ReactiveNode, SIGNAL} from '../../primitives/signals';
 
 /**
  * Constructs a `Resource` that projects a reactive request to an asynchronous operation defined by
@@ -82,7 +85,32 @@ export function resource<T, R>(options: ResourceOptions<T, R>): ResourceRef<T | 
     options.debugName,
     options.injector ?? inject(Injector),
     options.id as StateKey<T>,
+    undefined,
+    getRefCountedLifetime(options),
   );
+}
+
+/** The resolved `lifetime: 'refCounted'` options of a resource. Its presence selects that lifetime. */
+export interface RefCountedLifetime {
+  keepAliveMs: number;
+}
+
+/** Validates and resolves the lifetime options; `undefined` means the default injector-bound lifetime. */
+export function getRefCountedLifetime(
+  options: Pick<BaseResourceOptions<unknown, unknown>, 'lifetime' | 'keepAliveMs'>,
+): RefCountedLifetime | undefined {
+  if (options.lifetime !== 'refCounted') {
+    return undefined;
+  }
+  const keepAliveMs = options.keepAliveMs ?? 0;
+  if (!(Number.isFinite(keepAliveMs) && keepAliveMs >= 0)) {
+    throw new RuntimeError(
+      RuntimeErrorCode.INVALID_RESOURCE_KEEP_ALIVE,
+      ngDevMode &&
+        `\`keepAliveMs\` must be a finite, non-negative number of milliseconds, got ${keepAliveMs}.`,
+    );
+  }
+  return {keepAliveMs};
 }
 
 type ResourceInternalStatus = 'idle' | 'loading' | 'resolved' | 'local';
@@ -201,6 +229,17 @@ export class ResourceImpl<T, R> extends BaseWritableResource<T> implements Resou
   override readonly error: Signal<Error | undefined>;
   private readonly transferState: TransferState | undefined;
 
+  /**
+   * `lifetime: 'refCounted'`: whether the resource is referenced, that is, something live reads
+   * `state` or did so within `keepAliveMs`. `extRequest` is `idle` while false. Always true for the
+   * injector-bound lifetime.
+   */
+  private readonly live: WritableSignal<boolean>;
+  private readonly ngZone: NgZone | null;
+  private releaseTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Whether `state` was computed from a request at least once. Only read for `lifetime: 'refCounted'`. */
+  private started = false;
+
   constructor(
     request: (ctx: ResourceParamsContext) => R,
     private readonly loaderFn: ResourceStreamingLoader<T, R>,
@@ -210,6 +249,7 @@ export class ResourceImpl<T, R> extends BaseWritableResource<T> implements Resou
     injector: Injector,
     private transferCacheKey: StateKey<T> | undefined,
     getInitialStream?: (request: R) => Signal<ResourceStreamItem<T>> | undefined,
+    private readonly refCounted?: RefCountedLifetime,
   ) {
     if (isInParamsFunction()) {
       throw invalidResourceCreationInParams();
@@ -246,8 +286,18 @@ export class ResourceImpl<T, R> extends BaseWritableResource<T> implements Resou
 
     this.transferState = injector.get(TransferState, undefined, {optional: true}) ?? undefined;
 
+    this.live = signal(
+      !refCounted,
+      ngDevMode ? createDebugNameObject(debugName, 'live') : undefined,
+    );
+    this.ngZone = refCounted ? injector.get(NgZone, null, {optional: true}) : null;
+
     this.extRequest = linkedSignal<WrappedRequest>(
       () => {
+        // A ref-counted resource has nothing to load while nothing live reads it.
+        if (this.refCounted && !this.live()) {
+          return {status: 'idle', reload: 0};
+        }
         try {
           setInParamsFunction(true);
           return {request: request(paramsContext), reload: 0};
@@ -283,7 +333,10 @@ export class ResourceImpl<T, R> extends BaseWritableResource<T> implements Resou
             ngDevMode ? createDebugNameObject(this.debugName, 'stream') : undefined,
           );
         } else if (!status) {
-          if (!previous) {
+          // A ref-counted resource starts idle and unread, so the initial stream (`TransferState`,
+          // `getInitialStream`) applies to its first request rather than its first computation.
+          if (!previous || (this.refCounted && !this.started)) {
+            this.started = true;
             const transferState = this.transferState;
             const cacheKey = this.transferCacheKey;
             if (cacheState.isActive && cacheKey && transferState && request !== undefined) {
@@ -319,6 +372,13 @@ export class ResourceImpl<T, R> extends BaseWritableResource<T> implements Resou
       },
       ...(ngDevMode ? createDebugNameObject(debugName, 'state') : undefined),
     });
+
+    if (refCounted) {
+      // Every public signal derives from `state`, so its liveness is the resource's liveness.
+      const node = this.state[SIGNAL] as ReactiveNode;
+      node.watched = () => this.acquire();
+      node.unwatched = () => this.scheduleRelease();
+    }
 
     this.effectRef = effect(this.loadEffect.bind(this), {
       injector,
@@ -399,6 +459,7 @@ export class ResourceImpl<T, R> extends BaseWritableResource<T> implements Resou
     this.unregisterOnDestroy();
     this.effectRef.destroy();
     this.abortInProgressLoad();
+    this.clearReleaseTimer();
 
     // Destroyed resources enter Idle state.
     this.state.set({
@@ -523,6 +584,40 @@ export class ResourceImpl<T, R> extends BaseWritableResource<T> implements Resou
     // Once the load is aborted, we no longer want to block stability on its resolution.
     this.resolvePendingTask?.();
     this.resolvePendingTask = undefined;
+  }
+
+  /** `lifetime: 'refCounted'`: the first live reader arrived, or one came back within `keepAliveMs`. */
+  private acquire(): void {
+    this.clearReleaseTimer();
+    if (this.destroyed || untracked(this.live)) {
+      return;
+    }
+    // Runs inside a reactive read (see `ReactiveNode.watched`), hence `untracked`.
+    untracked(() => this.live.set(true));
+  }
+
+  /** `lifetime: 'refCounted'`: the last live reader left; release unless one comes back in time. */
+  private scheduleRelease(): void {
+    if (this.destroyed || this.releaseTimer !== undefined) {
+      return;
+    }
+    // Outside the zone, so that a long `keepAliveMs` does not hold app stability.
+    const schedule = () => setTimeout(() => this.release(), this.refCounted!.keepAliveMs);
+    this.releaseTimer = this.ngZone ? this.ngZone.runOutsideAngular(schedule) : schedule();
+  }
+
+  private release(): void {
+    this.releaseTimer = undefined;
+    this.abortInProgressLoad();
+    // Turns `extRequest`, and with it `state`, idle.
+    this.live.set(false);
+  }
+
+  private clearReleaseTimer(): void {
+    if (this.releaseTimer !== undefined) {
+      clearTimeout(this.releaseTimer);
+      this.releaseTimer = undefined;
+    }
   }
 }
 

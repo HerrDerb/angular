@@ -13,3 +13,4 @@ export {toObservable, ToObservableOptions} from './to_observable';
 export {toSignal, ToSignalOptions} from './to_signal';
 export {pendingUntilEvent} from './pending_until_event';
 export {RxResourceOptions, rxResource} from './rx_resource';
+export {RefCountedRxResourceOptions, refCountedRxResource} from './ref_counted_rx_resource';

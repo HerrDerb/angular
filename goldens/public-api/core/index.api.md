@@ -196,6 +196,8 @@ export interface BaseResourceOptions<T, R> {
     equal?: ValueEqualityFn<T>;
     id?: string;
     injector?: Injector;
+    keepAliveMs?: number;
+    lifetime?: 'injector' | 'refCounted';
     params?: (ctx: ResourceParamsContext) => R;
 }
 

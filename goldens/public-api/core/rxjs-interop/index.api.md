@@ -19,6 +19,17 @@ export function outputToObservable<T>(ref: OutputRef<T>): Observable<T>;
 export function pendingUntilEvent<T>(injector?: Injector): MonoTypeOperatorFunction<T>;
 
 // @public
+export function refCountedRxResource<T, R>(opts: RefCountedRxResourceOptions<T, R> & {
+    defaultValue: NoInfer<T>;
+}): ResourceRef<T>;
+
+// @public
+export function refCountedRxResource<T, R>(opts: RefCountedRxResourceOptions<T, R>): ResourceRef<T | undefined>;
+
+// @public
+export type RefCountedRxResourceOptions<T, R> = Omit<RxResourceOptions<T, R>, 'lifetime'>;
+
+// @public
 export function rxResource<T, R>(opts: RxResourceOptions<T, R> & {
     defaultValue: NoInfer<T>;
 }): ResourceRef<T>;

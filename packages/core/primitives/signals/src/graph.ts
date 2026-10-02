@@ -191,6 +191,21 @@ export interface ReactiveNode {
   consumerOnSignalRead(node: unknown): void;
 
   /**
+   * Called when this node gains its first live consumer, directly or transitively through
+   * computeds. Together with `unwatched` this lets a producer start work only while something
+   * live (a template, an effect) depends on it.
+   *
+   * Runs inside the graph's bookkeeping, usually during a reactive read: implementations must not
+   * create reactive consumers here and should wrap signal writes in `untracked`.
+   */
+  watched?(): void;
+
+  /**
+   * Called when this node loses its last live consumer. See `watched`.
+   */
+  unwatched?(): void;
+
+  /**
    * A debug name for the reactive node. Used in Angular DevTools to identify the node.
    */
   debugName?: string;
@@ -540,6 +555,8 @@ function producerAddLiveConsumer(node: ReactiveNode, link: ReactiveLink): void {
     ) {
       producerAddLiveConsumer(link.producer, link);
     }
+    // After the graph is consistent, so the hook may read or (untracked) write signals.
+    node.watched?.();
   }
 }
 
@@ -564,6 +581,7 @@ function producerRemoveLiveConsumerLink(link: ReactiveLink): ReactiveLink | unde
       while (producerLink !== undefined) {
         producerLink = producerRemoveLiveConsumerLink(producerLink);
       }
+      producer.unwatched?.();
     }
   }
   return nextProducer;
